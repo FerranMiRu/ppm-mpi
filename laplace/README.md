@@ -13,3 +13,16 @@ Each team must submit a report explaining the parallelization carried out, why t
 The code must be included in a .c file (or files), and the report in a PDF file. All files must be compressed into one zip file and delivered via Virtual Campus.
 
 The maximum mark is 6.
+
+## Real Output
+
+Iteration 10 -> Error = 0.127748
+Iteration 20 -> Error = 0.075729
+Iteration 30 -> Error = 0.050112
+Iteration 40 -> Error = 0.033732
+Iteration 50 -> Error = 0.022705
+Iteration 60 -> Error = 0.015282
+Iteration 70 -> Error = 0.010286
+Iteration 80 -> Error = 0.006925
+Iteration 90 -> Error = 0.004660
+Iteration 100 -> Error = 0.003134
