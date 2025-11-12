@@ -1,0 +1,20 @@
+mkdir -p executables
+mpicc  src/laplace.c -o executables/laplace.exe -lm
+make: Warning: File 'src/mpi_laplace.c' has modification time 57 s in the future
+mpicc  src/mpi_laplace.c -o executables/mpi_laplace.exe -lm -lmpi
+make: warning:  Clock skew detected.  Your build may be incomplete.
+
+Iteration 10 -> Error = 0.127748
+Iteration 20 -> Error = 0.075729
+Iteration 30 -> Error = 0.050112
+Iteration 40 -> Error = 0.033732
+Iteration 50 -> Error = 0.022705
+Iteration 60 -> Error = 0.015282
+Iteration 70 -> Error = 0.010286
+Iteration 80 -> Error = 0.006925
+Iteration 90 -> Error = 0.004660
+Iteration 100 -> Error = 0.003134
+
+find . -name ".DS_Store" -type f -delete
+rm -rf executables/
+rm -rf *.dSYM
