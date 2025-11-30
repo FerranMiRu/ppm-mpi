@@ -7,8 +7,8 @@ int main(int argc, char **argv) {
     const float tol = 1.0e-3f * 1.0e-3f;
     const float exp_PI = exp(-M_PI);
 
-    int n, m, process_start_n, process_finish_n, iter, rank, size, iter_max = 100;
-    float error, point_error;
+    int n, m, process_n, rank_n_step, iter, rank, size, iter_max = 100, i, j, p, row_index;
+    float error, point_error, calculation;
     float *A, *Anew, *Atmp;
 
     error = 1.0;
@@ -22,11 +22,24 @@ int main(int argc, char **argv) {
     n = atoi(argv[1]);
     m = atoi(argv[2]);
 
-    if ((A = malloc(sizeof(float) * n * m)) == NULL) {
+    MPI_Init(&argc, &argv);
+
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    rank_n_step = n / size;
+
+    if (rank == 0 || rank == size - 1) {
+        process_n = rank_n_step + 1;
+    } else {
+        process_n = rank_n_step + 2;
+    }
+
+    if ((A = malloc(sizeof(float) * process_n * m)) == NULL) {
         printf("Malloc of A failed!\n");
         exit(1);
     }
-    if ((Anew = malloc(sizeof(float) * n * m)) == NULL) {
+    if ((Anew = malloc(sizeof(float) * process_n * m)) == NULL) {
         printf("Malloc of Anew failed!\n");
         exit(1);
     }
@@ -38,8 +51,12 @@ int main(int argc, char **argv) {
 
     // set all values in matrix as zero
     // set boundary conditions
-    for (int i = 0; i < n; i++) {
-        float calculation = sinf(i * M_PI / (n - 1));
+    for (i = 0; i < process_n; i++) {
+        row_index = i + rank * rank_n_step;
+
+        if (rank != 0) row_index -= 1;
+
+        calculation = sinf(row_index * M_PI / (n - 1));
 
         A[i * m + 0] = calculation;
         A[i * m + m - 1] = exp_PI * calculation;
@@ -47,23 +64,11 @@ int main(int argc, char **argv) {
         Anew[i * m + 0] = A[i * m + 0];
         Anew[i * m + m - 1] = A[i * m + m - 1];
 
-        for (int j = 1; j < m - 1; j++) {
+        for (j = 1; j < m - 1; j++) {
             A[i * m + j] = 0;
+            Anew[i * m + j] = 0;
         }
     }
-
-    MPI_Init(&argc, &argv);
-
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-    MPI_Comm_size(MPI_COMM_WORLD, &size);
-
-    process_start_n = rank * n / size;
-    process_finish_n = (rank + 1) * n / size;
-
-    if (rank == 0)
-        process_start_n++;
-    else if (rank == size - 1)
-        process_finish_n--;
 
     // Main loop: iterate until error <= tol a maximum of iter_max iterations
     iter = 0;
@@ -72,8 +77,8 @@ int main(int argc, char **argv) {
         // Compute error = maximum of the square root of the absolute differences
         error = 0.0;
 
-        for (int i = process_start_n; i < process_finish_n; i++) {
-            for (int j = 1; j < m - 1; j++) {
+        for (i = 1; i < process_n - 1; i++) {
+            for (j = 1; j < m - 1; j++) {
                 Anew[i * m + j] = (A[(i - 1) * m + j] + A[(i + 1) * m + j] + A[i * m + (j - 1)] +
                                    A[i * m + (j + 1)]) /
                                   4;
@@ -89,26 +94,14 @@ int main(int argc, char **argv) {
         A = Anew;
         Anew = Atmp;
 
-        if (rank == 0) {
-            MPI_Send(&A[(process_finish_n - 1) * m], m, MPI_FLOAT, 1, 0, MPI_COMM_WORLD);
-        } else if (rank == size - 1) {
-            MPI_Recv(&A[(process_start_n - 1) * m], m, MPI_FLOAT, rank - 1, MPI_ANY_TAG,
-                     MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-        } else {
-            MPI_Recv(&A[(process_start_n - 1) * m], m, MPI_FLOAT, rank - 1, MPI_ANY_TAG,
-                     MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-            MPI_Send(&A[(process_finish_n - 1) * m], m, MPI_FLOAT, rank + 1, 0, MPI_COMM_WORLD);
+        if (rank > 0) {
+            MPI_Sendrecv(&A[m], m, MPI_FLOAT, rank - 1, rank, &A[0], m, MPI_FLOAT, rank - 1,
+                         rank - 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
         }
-
-        if (rank == 0) {
-            MPI_Recv(&A[process_finish_n * m], m, MPI_FLOAT, 1, MPI_ANY_TAG, MPI_COMM_WORLD,
-                     MPI_STATUS_IGNORE);
-        } else if (rank == size - 1) {
-            MPI_Send(&A[process_start_n * m], m, MPI_FLOAT, rank - 1, 0, MPI_COMM_WORLD);
-        } else {
-            MPI_Recv(&A[process_finish_n * m], m, MPI_FLOAT, rank + 1, MPI_ANY_TAG, MPI_COMM_WORLD,
-                     MPI_STATUS_IGNORE);
-            MPI_Send(&A[process_start_n * m], m, MPI_FLOAT, rank - 1, 0, MPI_COMM_WORLD);
+        if (rank < size - 1) {
+            MPI_Sendrecv(&A[(process_n - 2) * m], m, MPI_FLOAT, rank + 1, rank,
+                         &A[(process_n - 1) * m], m, MPI_FLOAT, rank + 1, rank + 1, MPI_COMM_WORLD,
+                         MPI_STATUS_IGNORE);
         }
 
         MPI_Allreduce(&error, &error, 1, MPI_FLOAT, MPI_MAX, MPI_COMM_WORLD);

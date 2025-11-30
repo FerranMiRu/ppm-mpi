@@ -1,0 +1,363 @@
+\documentclass{article}
+\usepackage[utf8]{inputenc}
+\usepackage[english]{babel}
+\usepackage{graphicx}
+\usepackage{geometry}
+\usepackage{setspace}
+\onehalfspacing
+\usepackage{blindtext}
+\usepackage{titlesec}
+\usepackage[style=phys,backend=biber]{biblatex}
+\setlength{\parindent}{0pt}
+\usepackage{tabularx}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{float}
+\usepackage{multirow}
+\usepackage{hyperref}
+\usepackage{wrapfig}
+\usepackage{changepage}
+\usepackage{booktabs}
+
+% Remove section numbering
+\setcounter{secnumdepth}{0}
+
+\title{Part 1 - Laplace Solver - MPI}
+\author{Ferran Mirabent Rubinat (1528268) - Marti Lorente Quintana (1444955)}
+\date{November 2025}
+
+\begin{document}
+
+\maketitle
+
+\begin{center}
+\textbf{Abstract}
+\end{center}
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+This report describes the parallelization strategy, implementation details, experimental methodology, and performance analysis of a Laplace equation solver parallelized using MPI. The solver implements the Jacobi iteration method on a 2D grid with domain decomposition. Two communication strategies are compared: blocking and non-blocking MPI operations. The implementation is analyzed through strong and weak scaling experiments across different processor counts and compared against a previous OpenMP implementation.
+\end{minipage}
+\end{center}
+
+\section{Introduction}
+
+The sequential Laplace solver code was provided from previous lab assignments, and the goal of this assignment is to parallelize the heat diffusion process using the Message Passing Interface (MPI). The simulation runs for a fixed number of iterations (100), computing the average of neighboring cells using the Jacobi iteration method until convergence.
+
+The main challenges addressed in this work are:
+
+\begin{itemize}
+    \item Correct distribution of the matrix across MPI processes
+    \item Heat propagation across subdomain boundaries using halo exchanges
+    \item Efficient convergence checking across distributed processes
+    \item Comparison between blocking and non-blocking communication strategies
+    \item Performance analysis across different scales and problem sizes
+\end{itemize}
+
+\section{Parallelization Strategy}
+
+\subsection{Domain Decomposition}
+
+The simulation uses a 1D row-wise decomposition. Given a global grid of size $rows \times columns$, the total number of rows is divided evenly among MPI ranks:
+
+\begin{itemize}
+    \item Each rank owns $chunk = rows / size$ real rows
+    \item Two additional rows are allocated for halo/ghost layers
+    \item The domain portion handled by each rank is: Rank $r$: $[r \cdot chunk, (r + 1) \cdot chunk - 1]$
+\end{itemize}
+
+This approach simplifies communication and minimizes boundary complexity.
+
+\subsection{Halo Exchange for Heat Propagation}
+
+Heat diffusion requires values from neighboring rows. To ensure correct propagation across process boundaries, each iteration performs:
+
+\begin{itemize}
+    \item Send the first real row to the upper neighbor and receive into the top halo row
+    \item Send the last real row to the lower neighbor and receive into the bottom halo row
+\end{itemize}
+
+Note that the first process (rank 0) only has one halo row (bottom), and the last process only has one halo row (top), as they lack neighbors on one side. Interior processes maintain two halo rows for bidirectional communication.
+
+This ensures seamless heat propagation across MPI subdomains.
+
+\subsection{Blocking Communication}
+
+The initial implementation uses \texttt{MPI\_Sendrecv} to exchange boundary rows with neighboring processes in a single blocking call:
+
+\begin{verbatim}
+MPI_Sendrecv(&matrix[1][0], columns, MPI_FLOAT, rank-1, TAG,
+             &matrix[0][0], columns, MPI_FLOAT, rank-1, TAG,
+             MPI_COMM_WORLD, &status);
+\end{verbatim}
+
+Convergence checking uses \texttt{MPI\_Allreduce} to compute the global error by summing local errors across all processes. The blocking approach guarantees communication completion before computation continues, but introduces synchronization points where processes may wait idle.
+
+\subsection{Non-Blocking Communication}
+
+To reduce synchronization overhead and enable potential computation-communication overlap, a non-blocking version was implemented using:
+
+\begin{itemize}
+    \item \texttt{MPI\_Irecv/MPI\_Isend}: Non-blocking routines that initiate communication and return immediately
+    \item \texttt{MPI\_Waitall}: Ensures all pending communications complete before using received data
+\end{itemize}
+
+The non-blocking approach aims to reduce idle time and improve scalability, though the current implementation posts and waits immediately, limiting actual overlap potential.
+
+\subsection{Global Residual and Convergence}
+
+Each local domain computes a residual value based on the difference between iterations. A global maximum residual is computed via:
+
+\begin{verbatim}
+MPI_Allreduce(&local_residual, &global_residual, 1,
+              MPI_FLOAT, MPI_MAX, MPI_COMM_WORLD);
+\end{verbatim}
+
+The simulation terminates after 100 iterations.
+
+\subsection{Reasoning Behind the Parallelization Strategy}
+
+The 1D row-wise decomposition was chosen for several reasons:
+
+\begin{itemize}
+    \item The stencil for heat diffusion requires only vertical neighbor communication
+    \item Communication volume is minimized (only two halo rows exchanged per iteration)
+    \item Implementation is simple and avoids complex 2D Cartesian communicators
+    \item It ensures balanced load as long as rows are evenly divisible
+\end{itemize}
+
+This strategy provides a good balance of implementation simplicity and computational scalability.
+
+\section{Performance Results}
+
+\subsection{Experimental Methodology}
+
+All experiments were conducted on a high-performance computing cluster with the following specifications:
+
+\begin{itemize}
+    \item Hardware: 1-8 nodes, 12 processors per node
+    \item Software: OpenMPI, TAU profiling toolkit
+    \item Measurement: Execution times measured using TAU, communication overhead profiled
+\end{itemize}
+
+Two scaling studies were performed:
+
+\textbf{Strong Scaling:} Fixed problem size (24000 $\times$ 24000 matrix, 100 iterations) with 12, 24, 48, and 96 processors.
+
+\textbf{Weak Scaling:} Problem size scales with processors (200 rows/processor): 2400$\times$2400, 4800$\times$4800, 9600$\times$9600, 19200$\times$19200.
+
+\subsection{Comparison with OpenMP}
+
+For baseline comparison, single-node performance (12 threads/processors, 4096$\times$4096 matrix, 100 iterations) was measured:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lc}
+\toprule
+\textbf{Implementation} & \textbf{Execution Time (s)} \\
+\midrule
+OpenMP (12 threads) & 0.4101 \\
+MPI Blocking (12 procs) & 3.3192 \\
+MPI Non-Blocking (12 procs) & 3.5428 \\
+\bottomrule
+\end{tabular}
+\caption{Single-node performance comparison (4096$\times$4096 matrix).}
+\label{tab:openmp_comparison}
+\end{table}
+
+OpenMP significantly outperforms MPI on a single node, achieving approximately 8$\times$ faster execution. This is expected because shared-memory parallelism (OpenMP) avoids communication overhead entirely, while MPI incurs message-passing costs even within a single node.
+
+\textbf{Note:} At this small problem size, blocking MPI slightly outperforms non-blocking (3.32s vs 3.54s), likely because the overhead of managing asynchronous operations exceeds any overlap benefits. However, as shown in subsequent sections, non-blocking communication demonstrates clear advantages at larger scales and problem sizes.
+
+\subsection{Execution Time Analysis}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{data/output/images/1_strong_scaling_time.png}
+    \caption{Strong scaling execution time breakdown. Solid lines show total time, dashed lines show communication time, dotted lines show computation time.}
+    \label{fig:strong_time}
+\end{figure}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{cccccccc}
+\toprule
+\textbf{Procs} & \multicolumn{3}{c}{\textbf{Blocking}} & \multicolumn{3}{c}{\textbf{Non-Blocking}} \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-7}
+ & \textbf{Total (s)} & \textbf{Comm (s)} & \textbf{Comm \%} & \textbf{Total (s)} & \textbf{Comm (s)} & \textbf{Comm \%} \\
+\midrule
+12  & 38.13 & 2.94 & 7.7  & 36.65 & 1.80 & 4.9  \\
+24  & 19.90 & 1.48 & 7.4  & 19.51 & 1.22 & 6.2  \\
+48  & 12.22 & 1.81 & 14.8 & 11.79 & 1.43 & 12.1 \\
+96  & 8.62  & 2.46 & 28.6 & 7.22  & 1.09 & 15.1 \\
+\bottomrule
+\end{tabular}
+\caption{Strong scaling execution time breakdown (24000$\times$24000 matrix, 100 iterations).}
+\label{tab:strong_time}
+\end{table}
+
+\textbf{Key Observations:}
+
+\begin{itemize}
+    \item Non-blocking communication consistently achieves lower total execution time at all scales
+    \item At 96 processors, non-blocking reduces total time by 16\% (7.22s vs 8.62s)
+    \item Communication overhead grows significantly with scale for blocking (7.7\% to 28.6\%)
+    \item Non-blocking maintains lower communication overhead at all scales, reaching only 15.1\% at 96 processors—nearly 50\% reduction compared to blocking
+\end{itemize}
+
+\subsection{Speedup and Efficiency}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{data/output/images/3_strong_scaling_speedup.png}
+    \caption{Strong scaling speedup comparison against ideal linear speedup.}
+    \label{fig:strong_speedup}
+\end{figure}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{ccccc}
+\toprule
+\textbf{Procs} & \multicolumn{2}{c}{\textbf{Blocking}} & \multicolumn{2}{c}{\textbf{Non-Blocking}} \\
+\cmidrule(lr){2-3} \cmidrule(lr){4-5}
+ & \textbf{Speedup} & \textbf{Efficiency (\%)} & \textbf{Speedup} & \textbf{Efficiency (\%)} \\
+\midrule
+12  & 1.00 & 100.0 & 1.00 & 100.0 \\
+24  & 1.92 & 95.8  & 1.88 & 93.9  \\
+48  & 3.12 & 78.0  & 3.11 & 77.7  \\
+96  & 4.42 & 55.3  & 5.07 & 63.4  \\
+\bottomrule
+\end{tabular}
+\caption{Strong scaling speedup and efficiency.}
+\label{tab:strong_speedup}
+\end{table}
+
+\textbf{Analysis:}
+
+\begin{itemize}
+    \item Non-blocking achieves 5.07$\times$ speedup at 96 processors compared to blocking's 4.42$\times$—a 15\% improvement
+    \item Efficiency remains above 63\% for non-blocking at 96 processors versus 55\% for blocking
+    \item Near-linear scaling is maintained up to 48 processors for both implementations
+    \item Non-blocking demonstrates superior scalability characteristics at larger process counts
+\end{itemize}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{data/output/images/4_strong_scaling_efficiency.png}
+    \caption{Strong scaling efficiency comparison showing better efficiency retention for non-blocking communication.}
+    \label{fig:strong_efficiency}
+\end{figure}
+
+\subsection{Weak Scaling Analysis}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{data/output/images/2_weak_scaling_time.png}
+    \caption{Weak scaling execution time. Problem size scales with processor count (200 rows/processor). Ideal weak scaling would maintain constant execution time.}
+    \label{fig:weak_time}
+\end{figure}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{cccccccc}
+\toprule
+\textbf{Procs} & \textbf{Matrix Size} & \multicolumn{3}{c}{\textbf{Blocking}} & \multicolumn{3}{c}{\textbf{Non-Blocking}} \\
+\cmidrule(lr){3-5} \cmidrule(lr){6-8}
+ & & \textbf{Total (s)} & \textbf{Comm (s)} & \textbf{Comm \%} & \textbf{Total (s)} & \textbf{Comm (s)} & \textbf{Comm \%} \\
+\midrule
+12  & 2400$\times$2400   & 1.96 & 0.06 & 2.8  & 1.95 & 0.05 & 2.4  \\
+24  & 4800$\times$4800   & 2.61 & 0.23 & 8.7  & 2.52 & 0.14 & 5.6  \\
+48  & 9600$\times$9600   & 3.97 & 0.72 & 18.0 & 3.53 & 0.33 & 9.3  \\
+96  & 19200$\times$19200 & 6.65 & 1.97 & 29.6 & 5.42 & 0.63 & 11.6 \\
+\bottomrule
+\end{tabular}
+\caption{Weak scaling execution time breakdown (200 rows/processor, 100 iterations).}
+\label{tab:weak_time}
+\end{table}
+
+\textbf{Critical Finding:} Non-blocking communication demonstrates significantly better weak scaling characteristics. At 96 processors:
+
+\begin{itemize}
+    \item Blocking: Execution time increased 3.39$\times$ versus baseline, with 29.6\% communication overhead
+    \item Non-blocking: Execution time increased only 2.78$\times$, with 11.6\% communication overhead
+    \item Communication overhead for non-blocking is less than half that of blocking at large scale
+\end{itemize}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{data/output/images/5_weak_scaling_efficiency.png}
+    \caption{Weak scaling efficiency comparison demonstrating superior scalability of non-blocking communication.}
+    \label{fig:weak_efficiency}
+\end{figure}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{ccc}
+\toprule
+\textbf{Processors} & \textbf{Blocking Eff. (\%)} & \textbf{Non-Blocking Eff. (\%)} \\
+\midrule
+12  & 100.0 & 100.0 \\
+24  & 75.1  & 77.3  \\
+48  & 49.4  & 55.1  \\
+96  & 29.5  & 36.0  \\
+\bottomrule
+\end{tabular}
+\caption{Weak scaling efficiency showing 6.5 percentage point advantage for non-blocking at 96 processors.}
+\label{tab:weak_efficiency}
+\end{table}
+
+\subsection{TAU Profiling Summary}
+
+TAU profiling revealed important differences between blocking and non-blocking implementations:
+
+\textbf{Blocking Implementation:}
+\begin{itemize}
+    \item Significant load imbalance detected in \texttt{MPI\_Sendrecv} (up to 3.9s variance)
+    \item \texttt{MPI\_Allreduce} shows up to 2.2s variance across processes
+    \item Communication overhead grows from 7.7\% to 28.6\% at largest scale
+\end{itemize}
+
+\textbf{Non-Blocking Implementation:}
+\begin{itemize}
+    \item Reduced load imbalance across all MPI operations
+    \item 8-node (96 processor) configuration showed zero load imbalance warnings
+    \item Communication overhead remains below 16\% even at 96 processors
+    \item Better process independence reduces synchronization bottlenecks
+\end{itemize}
+
+\subsection{Scalability Summary}
+
+Non-blocking communication provides consistent and measurable improvements:
+
+\begin{itemize}
+    \item \textbf{Strong scaling:} 15\% better speedup at 96 processors (5.07$\times$ vs 4.42$\times$)
+    \item \textbf{Weak scaling:} 22\% better efficiency retention at 96 processors (36.0\% vs 29.5\%)
+    \item \textbf{Communication overhead:} Approximately halved in percentage terms at large scale (15.1\% vs 28.6\%)
+    \item \textbf{Load balance:} Superior balance characteristics, particularly at larger scales
+\end{itemize}
+
+The benefits of non-blocking communication are most pronounced when scaling across multiple nodes where communication latency becomes significant.
+
+\section{Conclusions}
+
+This study demonstrates successful MPI parallelization of a Laplace equation solver with the following key findings:
+
+\textbf{1. Parallelization Success:} Both implementations achieve reasonable scaling characteristics. Non-blocking communication reaches 5.07$\times$ speedup at 96 processors (63.4\% efficiency) compared to blocking's 4.42$\times$ speedup (55.3\% efficiency) in strong scaling tests.
+
+\textbf{2. OpenMP vs MPI Trade-offs:} OpenMP significantly outperforms MPI on single-node configurations (0.41s vs 3.3s for small problems), demonstrating the inherent advantage of shared-memory parallelism when inter-node communication is unnecessary. However, MPI enables scaling beyond a single node, which is essential for larger problems that exceed single-node memory or computational capacity.
+
+\textbf{3. Problem Size Dependency:} Performance critically depends on computation-to-communication ratio. Small problems (4096$\times$4096) show minimal benefit from non-blocking due to low computation time. Larger problems (24000$\times$24000) consistently demonstrate non-blocking advantages, with communication overhead reduced from 28.6\% to 15.1\% at 96 processors.
+
+\textbf{4. Non-Blocking Advantages:} Non-blocking communication provides consistent improvements particularly at larger scales:
+\begin{itemize}
+    \item 15\% better speedup at 96 processors
+    \item 6.5 percentage points better weak scaling efficiency
+    \item Reduced load imbalance and synchronization bottlenecks
+    \item Lower communication overhead percentage at all multi-node configurations
+\end{itemize}
+
+\textbf{5. Scalability Characteristics:} Both implementations show degrading efficiency as scale increases, primarily due to growing communication overhead. This is expected in distributed-memory systems and represents a fundamental challenge for fine-grained stencil computations. Non-blocking communication partially mitigates this effect through reduced synchronization overhead.
+
+
+
+\end{document}
